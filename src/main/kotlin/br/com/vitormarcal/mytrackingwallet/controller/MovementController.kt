@@ -1,6 +1,6 @@
 package br.com.vitormarcal.mytrackingwallet.controller
 
-import br.com.vitormarcal.mytrackingwallet.repository.domain.GroupedValuesByCategoryDTO
+import br.com.vitormarcal.mytrackingwallet.repository.domain.CategoryRepository
 import br.com.vitormarcal.mytrackingwallet.repository.domain.Movement
 import br.com.vitormarcal.mytrackingwallet.repository.domain.MovementRepository
 import org.springframework.format.annotation.DateTimeFormat
@@ -9,11 +9,13 @@ import java.math.BigDecimal
 import java.math.RoundingMode
 import java.time.LocalDate
 import java.util.*
-import javax.annotation.PostConstruct
 
 @RestController
 @RequestMapping("/movement")
-class MovementController(private val movementRepository: MovementRepository) {
+class MovementController(
+        private val movementRepository: MovementRepository,
+        private val categoryRepository: CategoryRepository
+) {
     @GetMapping
     fun findAll(): List<Movement> = movementRepository.findAll()
 
@@ -53,23 +55,71 @@ class MovementController(private val movementRepository: MovementRepository) {
         }
     }
 
-    @GetMapping("values")
-    fun groupyValuesByCategory(
+    @GetMapping("consolidated")
+    fun consolidated(
             @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) startDate: LocalDate,
-            @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) endDate: LocalDate): TotalMovement =
-            movementRepository.groupSumValuesByCategoryInSettleDatePeriod(startDate = startDate, endDate = endDate).let {
-                val total = it.map { movement -> movement.getTotalValue() }
-                        .fold(BigDecimal.ZERO, BigDecimal::add)
+            @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) endDate: LocalDate): ResultValues {
+        movementRepository.findBySettleDateBetween(startDate = startDate, endDate = endDate)
+                .let { movements ->
+                    val categories = movements.map { it.categoryId }.distinct().takeIf { it.isNotEmpty() }?.let {
+                        categoryRepository.findAllById(it)
+                    } ?: emptyList()
+                    val diffSpentAndCredit = movements.diffSpentAndCredit()
 
-                return TotalMovement(
-                       total = total,
-                        totalByCategory = it
-                )
-            }
+                    val diffByCategory = movements.groupBy { it.categoryId }.map { it.key to it.value.diffSpentAndCredit() }
 
-    class TotalMovement(
-            val total: BigDecimal,
-            val totalByCategory: List<GroupedValuesByCategoryDTO>
+                    val map = diffByCategory.map { v -> categories.first { it.id == v.first }.name to v.second }.toList()
+
+                    return ResultValues(
+                            totalCredit = diffSpentAndCredit.totalCredit,
+                            totalSpent = diffSpentAndCredit.totalSpent,
+                            diffSpentAndCredit = diffSpentAndCredit.diffSpentAndCredit,
+                            data = map
+                    )
+
+                }
+
+    }
+
+
+    fun List<Movement>.total(): BigDecimal {
+        return this.map(Movement::value)
+                .fold(BigDecimal.ZERO, BigDecimal::add)
+    }
+
+    fun List<Movement>.diffSpentAndCredit(): Values {
+        this.groupBy { it.credit }.let { grouped ->
+            val creditMovementList = grouped[true] ?: emptyList()
+            val spentMovementList = grouped[false] ?: emptyList()
+            val totalSpent = spentMovementList
+                    .total()
+            val totalCredit = creditMovementList
+                    .total()
+            val diffSpentAndCredit = totalSpent.add(totalCredit * "-1".toBigDecimal())
+            return Values(
+                    totalSpent = totalSpent,
+                    totalCredit = totalCredit,
+                    diffSpentAndCredit = diffSpentAndCredit,
+                    creditMovementList = creditMovementList,
+                    spentMovementList = spentMovementList
+            )
+        }
+    }
+
+
+    class ResultValues(
+            val totalSpent: BigDecimal,
+            val totalCredit: BigDecimal,
+            val diffSpentAndCredit: BigDecimal,
+            val data: List<Pair<String, Values>>
+    )
+
+    class Values(
+            val totalSpent: BigDecimal,
+            val totalCredit: BigDecimal,
+            val creditMovementList: List<Movement>,
+            val spentMovementList: List<Movement>,
+            val diffSpentAndCredit: BigDecimal
     )
 
 }
